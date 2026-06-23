@@ -4,8 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use typst::{
-    layout::PagedDocument,
-    syntax::{FileId, Source, VirtualPath},
+    syntax::{FileId, Source, VirtualPath, RootedPath, VirtualRoot},
 };
 
 use crate::{
@@ -72,9 +71,6 @@ pub fn compile_cards(
 
     let uploader = anki_api::CardUploaderThread::new();
 
-    let mut base_length: usize = 0;
-    let mut current_file_path = String::new();
-
     let mut world = typst_as_library::TypstWrapperWorld::new_with_download_locks(
         cfg.path.to_string_lossy().into_owned(),
         "".to_string(),
@@ -85,7 +81,6 @@ pub fn compile_cards(
     );
     world.output_manager = Some(output.clone());
 
-    let mut content_range: Range<usize> = 0..0;
 
     let card_error = |card: &CardInfo, m: OutputMessage| {
         let mut cache_manager = cache_manager.lock().unwrap();
@@ -106,58 +101,46 @@ pub fn compile_cards(
         output.send(m);
     };
 
-    // Returns a Result with Option of front and back base64 strings
+    // Returns a Result with Option of front and back HTML strings
     let mut compile_card = |card: &CardInfo| -> Result<Option<(String, String)>, String> {
         if card.modification_status == CardModificationStatus::Unchanged {
             output.send(OutputMessage::SkipCompileCard(card.into()));
             return Ok(None);
         }
-        if current_file_path != card.path_relative_to_root() {
-            current_file_path = card.path_relative_to_root();
+        
+        let mut compile_side = |side: &str| -> Result<String, String> {
             let base = generator::generate_card_file_content(
                 card.relative_ankiconf_path(),
                 "".to_string(),
+                side,
             );
-            base_length = base.len();
             world.source = Source::new(
-                FileId::new(None, VirtualPath::new(&current_file_path)),
-                base,
+                FileId::new(RootedPath::new(VirtualRoot::Project, VirtualPath::new(&card.path_relative_to_root()).unwrap())),
+                base.clone(),
             );
-            content_range = base_length..base_length;
-        }
-        world.source.edit(content_range.clone(), &card.content);
+            world.source.edit(base.len()..base.len(), &card.content);
 
-        let last = world.source.text().len();
-        content_range = base_length..last;
+            let out = typst::compile(&world);
+            let document = out.output.map_err(|e| {
+                typst_as_library::render_diagnostics(
+                    &world,
+                    e.as_slice(),
+                    out.warnings.as_slice(),
+                    DiagnosticFormat::Human,
+                )
+                .unwrap_or_else(|_| "Failed to render diagnostics.".to_string())
+            })?;
 
-        let out = typst::compile(&world);
-        let document: PagedDocument = out.output.map_err(|e| {
-            typst_as_library::render_diagnostics(
-                &world,
-                e.as_slice(),
-                out.warnings.as_slice(),
-                DiagnosticFormat::Human,
-            )
-            .unwrap_or_else(|_| "Failed to render diagnostics.".to_string())
-        })?;
+            typst_html::html(&document, &typst_html::HtmlOptions::default())
+                .map_err(|e| format!("Error generating HTML for {} side: {:?}", side, e))
+        };
 
-        if document.pages.len() < 2 {
-            return Err("Error: Compiled document has less than 2 pages.".to_string());
-        }
-
-        let render = typst_render::render(&document.pages[0], 2.0)
-            .encode_png()
-            .map_err(|_| "Error encoding front side PNG.")?;
-        let front_b64 = utils::b64_encode(render);
-
-        let render = typst_render::render(&document.pages[1], 2.0)
-            .encode_png()
-            .map_err(|_| "Error encoding back side PNG.")?;
-        let back_b64 = utils::b64_encode(render);
+        let front_html = compile_side("front")?;
+        let back_html = compile_side("back")?;
 
         output.send(OutputMessage::CompiledCard(card.into()));
 
-        Ok(Some((front_b64, back_b64)))
+        Ok(Some((front_html, back_html)))
     };
 
     for card in cards {

@@ -1,6 +1,6 @@
 use crate::{card_wrapper::CardInfo, config};
 
-pub fn generate_card_file_content(ankiconf_relative_path: String, card_content: String) -> String {
+pub fn generate_card_file_content(ankiconf_relative_path: String, card_content: String, side: &str) -> String {
     let cfg = config::get();
 
     // display_with_width: different when max_card_width == "auto"
@@ -56,24 +56,26 @@ pub fn generate_card_file_content(ankiconf_relative_path: String, card_content: 
     template.push_str(&display_with_width);
     template.push_str("\n\n");
 
-    let cardlet = r#"#let card(
+    let cardlet = format!(
+        r#"#let card(
       id: "",
       q: "",
       a: "",
       ..args
-    ) = {
+    ) = {{
       let args = arguments(..args, type: "basic")
-      if args.at("type") == "basic" {
-        context[
-          #display_with_width(q)
-          #pagebreak()
-          #display_with_width(a)
-        ]
-      }
-    }
+      if args.at("type") == "basic" {{
+        if "{side}" == "front" {{
+          display_with_width(q)
+        }} else {{
+          display_with_width(a)
+        }}
+      }}
+    }}
     #let custom-card = card
-    "#
-    .to_string();
+    "#,
+        side = side
+    );
     template.push_str(&cardlet);
     template.push_str("\n\n");
 
@@ -89,5 +91,5 @@ pub fn generate_card_file(card: &CardInfo) -> String {
         card.relative_ankiconf_path()
     );
 
-    generate_card_file_content(card.relative_ankiconf_path(), card.content.clone())
+    generate_card_file_content(card.relative_ankiconf_path(), card.content.clone(), "front")
 }

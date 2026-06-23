@@ -10,7 +10,7 @@ use once_cell::sync::OnceCell;
 use serde_json::{Value, json};
 use toml::Value as TomlValue;
 
-use html_escape::encode_double_quoted_attribute;
+
 
 use crate::card_wrapper::CardInfo;
 use crate::utils;
@@ -128,18 +128,12 @@ impl Config {
         self.exclude_files.iter().any(|p| p.matches(file_name))
     }
 
-    pub fn template_front(&self, _card_info: &CardInfo, front_image_path: &str) -> String {
-        format!(
-            r#"<img src="{}">"#,
-            encode_double_quoted_attribute(front_image_path)
-        )
+    pub fn template_front(&self, _card_info: &CardInfo, front_html: &str) -> String {
+        front_html.to_string()
     }
 
-    pub fn template_back(&self, _card_info: &CardInfo, back_image_path: &str) -> String {
-        format!(
-            r#"<img src="{}">"#,
-            encode_double_quoted_attribute(back_image_path)
-        )
+    pub fn template_back(&self, _card_info: &CardInfo, back_html: &str) -> String {
+        back_html.to_string()
     }
 
     pub fn destruct(&self) {

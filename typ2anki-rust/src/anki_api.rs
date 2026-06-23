@@ -264,15 +264,13 @@ impl CardUploaderThread {
     pub fn upload_card(
         &self,
         card: &CardInfo,
-        front_data_base64: &String,
-        back_data_base64: &String,
+        front_html: &String,
+        back_html: &String,
     ) -> Result<(), String> {
         let cfg = config::get();
         if cfg.dry_run {
             return Ok(());
         }
-        self.upload_file(card.image_path(1), front_data_base64)?;
-        self.upload_file(card.image_path(2), back_data_base64)?;
 
         let note_ids = find_note_id_by_tag(&card.card_id)?;
         let tags = vec![card.card_id.clone()];
@@ -287,8 +285,8 @@ impl CardUploaderThread {
                     "note": {
                         "id": note_id,
                         "fields": {
-                            "Front": cfg.template_front(card,card.image_path(1).as_str()),
-                            "Back": cfg.template_back(card,card.image_path(2).as_str()),
+                            "Front": cfg.template_front(card, front_html),
+                            "Back": cfg.template_back(card, back_html),
                         },
                         "tags": tags
                     }
@@ -304,8 +302,8 @@ impl CardUploaderThread {
                         "deckName": card.anki_deck_name,
                         "modelName": model_name,
                         "fields": {
-                            model_field_front: cfg.template_front(card,card.image_path(1).as_str()),
-                            model_field_back: cfg.template_back(card,card.image_path(2).as_str()),
+                            model_field_front: cfg.template_front(card, front_html),
+                            model_field_back: cfg.template_back(card, back_html),
                         },
                         "tags": tags
                     }

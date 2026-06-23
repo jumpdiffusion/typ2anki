@@ -11,11 +11,11 @@ use typst::diag::{FileError, FileResult, PackageError, PackageResult, Severity, 
 use typst::ecow::eco_format;
 use typst::foundations::{Bytes, Datetime, Dict, IntoValue};
 use typst::syntax::package::PackageSpec;
-use typst::syntax::{FileId, Lines, Source, Span, VirtualPath};
+use typst::syntax::{FileId, Lines, Source, Span, VirtualPath, RootedPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, WorldExt};
-use typst_kit::fonts::{FontSearcher, FontSlot};
+
 
 use crate::output::OutputManager;
 
@@ -40,7 +40,7 @@ pub struct TypstWrapperWorld {
     book: LazyHash<FontBook>,
 
     /// Metadata about all known fonts.
-    fonts: Vec<FontSlot>,
+    fonts: typst_kit::fonts::FontStore,
 
     /// Map of all known files.
     files: Arc<Mutex<HashMap<FileId, FileEntry>>>,
@@ -62,23 +62,28 @@ pub struct TypstWrapperWorld {
 impl TypstWrapperWorld {
     pub fn new(root: String, source: String, inputs: &Vec<(String, String)>) -> Self {
         let root = PathBuf::from(root);
-        let fonts = FontSearcher::new().include_system_fonts(true).search();
+        let mut fonts = typst_kit::fonts::FontStore::new();
+        fonts.extend(typst_kit::fonts::system());
+        fonts.extend(typst_kit::fonts::embedded());
 
         let inputs: Dict = inputs
             .iter()
             .map(|(k, v)| (k.as_str().into(), v.as_str().into_value()))
             .collect();
-        let library = Library::builder().with_inputs(inputs).build();
+        let library = Library::builder()
+            .with_inputs(inputs)
+            .with_features(typst::Features::all())
+            .build();
 
         let cache_directory = crate::utils::get_typ2anki_tmp();
 
         Self {
             library: LazyHash::new(library),
-            book: LazyHash::new(fonts.book),
+            book: fonts.book().clone(),
             root,
             workdir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            fonts: fonts.fonts,
-            source: Source::new(FileId::new(None, VirtualPath::new("main.typ")), source),
+            fonts,
+            source: Source::new(FileId::new(RootedPath::new(VirtualRoot::Project, VirtualPath::new("main.typ").unwrap())), source),
             time: time::OffsetDateTime::now_utc(),
             cache_directory,
             http: reqwest::blocking::Client::new(),
@@ -144,13 +149,16 @@ impl TypstWrapperWorld {
         if let Some(entry) = files.get(&id) {
             return Ok(entry.clone());
         }
-        let path = if let Some(package) = id.package() {
-            let package_dir = self.download_package(package)?;
-            id.vpath().resolve(&package_dir)
-        } else {
-            id.vpath().resolve(&self.root)
+        let path = match id.root() {
+            VirtualRoot::Package(package) => {
+                let package_dir = self.download_package(package)?;
+                id.vpath().realize(&package_dir)
+            }
+            VirtualRoot::Project => {
+                id.vpath().realize(&self.root)
+            }
         }
-        .ok_or(FileError::AccessDenied)?;
+        .map_err(|_| FileError::AccessDenied)?;
 
         let content = std::fs::read(&path).map_err(|error| FileError::from_io(error, &path))?;
         Ok(files
@@ -253,15 +261,16 @@ impl typst::World for TypstWrapperWorld {
 
     /// Accessing a specified font per index of font book.
     fn font(&self, id: usize) -> Option<Font> {
-        self.fonts[id].get()
+        self.fonts.font(id)
     }
 
     /// Get the current date.
     ///
     /// Optionally, an offset in hours is given.
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
-        let offset = offset.unwrap_or(0);
-        let offset = time::UtcOffset::from_hms(offset.try_into().ok()?, 0, 0).ok()?;
+    fn today(&self, offset: Option<typst::foundations::Duration>) -> Option<Datetime> {
+        let offset = offset.unwrap_or(typst::foundations::Duration::construct(0, 0, 0, 0, 0));
+        let offset_hours: i64 = offset.hours() as i64;
+        let offset = time::UtcOffset::from_hms(offset_hours.try_into().ok()?, 0, 0).ok()?;
         let time = self.time.checked_to_offset(offset)?;
         Some(Datetime::Date(time.date()))
     }
@@ -304,17 +313,19 @@ impl<'a> codespan_reporting::files::Files<'a> for TypstWrapperWorld {
 
     fn name(&'a self, id: FileId) -> CodespanResult<Self::Name> {
         let vpath = id.vpath();
-        Ok(if let Some(package) = id.package() {
-            format!("{package}{}", vpath.as_rooted_path().display())
-        } else {
-            // Try to express the path relative to the working directory.
-            vpath
-                .resolve(self.root.as_path())
-                .and_then(|abs| pathdiff::diff_paths(abs, self.workdir.as_path()))
-                .as_deref()
-                .unwrap_or_else(|| vpath.as_rootless_path())
-                .to_string_lossy()
-                .into()
+        Ok(match id.root() {
+            VirtualRoot::Package(package) => format!("{package}{}", vpath.get_with_slash()),
+            VirtualRoot::Project => {
+                // Try to express the path relative to the working directory.
+                vpath
+                    .realize(self.root.as_path())
+                    .ok()
+                    .and_then(|abs| pathdiff::diff_paths(abs, self.workdir.as_path()))
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new(vpath.get_without_slash()))
+                    .to_string_lossy()
+                    .into()
+            }
         })
     }
 
@@ -382,10 +393,10 @@ pub fn render_diagnostics(
             diagnostic
                 .hints
                 .iter()
-                .map(|e| (eco_format!("hint: {e}")).into())
+                .map(|e| e.v.to_string())
                 .collect()
         })
-        .with_labels(label(world, diagnostic.span).into_iter().collect());
+        .with_labels(label_diag(world, diagnostic.span).into_iter().collect());
 
         term::emit_to_write_style(&mut writer, &config, world, &diag)?;
 
@@ -405,6 +416,10 @@ pub fn render_diagnostics(
 }
 
 /// Create a label for a span.
-fn label(world: &TypstWrapperWorld, span: Span) -> Option<Label<FileId>> {
+fn label(world: &TypstWrapperWorld, span: typst::syntax::Span) -> Option<Label<FileId>> {
+    Some(Label::primary(span.id()?, world.range(span)?))
+}
+
+fn label_diag(world: &TypstWrapperWorld, span: typst_syntax::DiagSpan) -> Option<Label<FileId>> {
     Some(Label::primary(span.id()?, world.range(span)?))
 }
